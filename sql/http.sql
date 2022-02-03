@@ -8,12 +8,12 @@ SELECT status
 FROM http_get('https://httpbin.org/status/202');
 
 -- Headers
-SELECT *
+SELECT lower(field) AS field, value
 FROM (
 	SELECT (unnest(headers)).*
 	FROM http_get('https://httpbin.org/response-headers?Abcde=abcde')
 ) a
-WHERE field = 'Abcde';
+WHERE field ILIKE 'Abcde';
 
 -- GET
 SELECT status,
@@ -62,18 +62,18 @@ content::json->'method' AS method
 FROM http_post('https://httpbin.org/anything?foo=bar','payload','text/plain');
 
 -- HEAD
-SELECT *
+SELECT lower(field) AS field, value
 FROM (
 	SELECT (unnest(headers)).*
 	FROM http_head('https://httpbin.org/response-headers?Abcde=abcde')
 ) a
-WHERE field = 'Abcde';
+WHERE field ILIKE 'Abcde';
 
 -- Follow redirect
 SELECT status,
 content::json->'args' AS args,
 content::json->'url' AS url
-FROM http_get('https://httpbin.org/redirect-to?url=http%3A%2F%2Fhttpbin%2Eorg%2Fget%3Ffoo%3Dbar');
+FROM http_get('https://httpbingo.org/redirect-to?url=https%3A%2F%2Fhttpbingo%2Eorg%2Fget%3Ffoo%3Dbar');
 
 -- Request image
 WITH
@@ -88,7 +88,7 @@ SELECT
   length(textsend(http.content)) AS length_binary,
   headers.value AS length_headers
 FROM http, headers
-WHERE field = 'Content-Length';
+WHERE field ILIKE 'Content-Length';
 
 -- Alter options and and reset them and throw errors
 SELECT http_set_curlopt('CURLOPT_PROXY', '127.0.0.1');

@@ -1,10 +1,10 @@
 # PostgreSQL HTTP Client
 
-[![Build Status](https://api.travis-ci.org/pramsey/pgsql-http.svg?branch=master)](https://travis-ci.org/pramsey/pgsql-http)
+[![CI](https://github.com/pramsey/pgsql-http/workflows/CI/badge.svg?branch=master)](https://github.com/pramsey/pgsql-http/actions?query=branch%3Amaster)
 
 ## Motivation
 
-Wouldn't it be nice to be able to write a trigger that [called a web service](https://boundlessgeo.com/2012/04/http-for-postgresql/)? Either to get back a result, or to poke that service into refreshing itself against the new state of the database?
+Wouldn't it be nice to be able to write a trigger that called a web service? Either to get back a result, or to poke that service into refreshing itself against the new state of the database?
 
 This extension is for that.
 
@@ -155,6 +155,7 @@ FROM
 --------+-----------------------------------------------------------
     302 | http://www.google.ch/?gfe_rd=cr&ei=ACESWLy_KuvI8zeghL64Ag
 ```
+
 ## Concepts
 
 Every HTTP call is a made up of an `http_request` and an `http_response`.
@@ -200,6 +201,7 @@ As seen in the examples, you can unspool the array of `http_header` tuples into 
 * `http_head(uri VARCHAR)` returns `http_response`
 * `http_set_curlopt(curlopt VARCHAR, value varchar)` returns `boolean`
 * `http_reset_curlopt()` returns `boolean`
+* `http_list_curlopt()` returns `setof(curlopt text, value text)`
 * `urlencode(string VARCHAR)` returns `text`
 
 ## CURL Options
@@ -230,15 +232,42 @@ Select [CURL options](https://curl.haxx.se/libcurl/c/curl_easy_setopt.html) are 
 * [CURLOPT_TCP_KEEPALIVE](https://curl.haxx.se/libcurl/c/CURLOPT_TCP_KEEPALIVE.html)
 * [CURLOPT_TCP_KEEPIDLE](https://curl.haxx.se/libcurl/c/CURLOPT_TCP_KEEPIDLE.html)
 * [CURLOPT_CONNECTTIMEOUT](https://curl.haxx.se/libcurl/c/CURLOPT_CONNECTTIMEOUT.html)
+* [CURLOPT_USERAGENT](https://curl.haxx.se/libcurl/c/CURLOPT_USERAGENT.html)
+
 
 
 For example,
 
 ```sql
+-- Set the PROXYPORT option
 SELECT http_set_curlopt('CURLOPT_PROXYPORT', '12345');
+
+-- List all currently set options
+SELECT * FROM http_list_curlopt();
 ```
 
 Will set the proxy port option for the lifetime of the database connection. You can reset all CURL options to their defaults using the `http_reset_curlopt()` function.
+
+Using this extension as a background automated process without supervision (e.g as a trigger) may have unintended consequences for other servers.
+It is considered a best practice to share contact information with your requests,
+so that administrators can reach you in case your HTTP calls get out of control.
+
+Certain API policies (e.g. [Wikimedia User-Agent policy](https://meta.wikimedia.org/wiki/User-Agent_policy)) may even require sharing specific contact information
+with each request. Others may disallow (via `robots.txt`) certain agents they don't recognize.
+
+For such cases you can set the `CURLOPT_USERAGENT` option
+
+```sql
+SELECT http_set_curlopt('CURLOPT_USERAGENT',
+                        'Examplebot/2.1 (+http://www.example.com/bot.html) Contact abuse@example.com');
+
+SELECT status, content::json ->> 'user-agent' FROM http_get('http://httpbin.org/user-agent');
+```
+```
+ status |                         user_agent
+--------+-----------------------------------------------------------
+    200 | Examplebot/2.1 (+http://www.example.com/bot.html) Contact abuse@example.com
+```
 
 ## Keep-Alive & Timeouts
 
@@ -258,7 +287,7 @@ By default a 5 second timeout is set for the completion of a request.  If a diff
 
 ### UNIX
 
-If you have PostgreSQL (>= 9.3) devel packages and CURL devel packages installed (>= 0.7.20), you should have `pg_config` and `curl-config` on your path, so you should be able to just run `make`, then `make install`, then in your database `CREATE EXTENSION http`.
+If you have PostgreSQL (>= 9.3) devel packages and CURL devel packages installed (>= 0.7.20), you should have `pg_config` and `curl-config` on your path, so you should be able to just run `make` (or `gmake`), then `make install`, then in your database `CREATE EXTENSION http`.
 
 If you already installed a previous version and you just want to upgrade, then `ALTER EXTENSION http UPDATE`.
 
@@ -268,7 +297,7 @@ There is a build available at [postgresonline](http://www.postgresonline.com/jou
 
 ## Why This is a Bad Idea
 
-- "What happens if the web page takes a long time to return?" Your SQL call will just wait there until it does. Make sure your web service fails fast.
+- "What happens if the web page takes a long time to return?" Your SQL call will just wait there until it does. Make sure your web service fails fast. Or (dangerous in a different way) run your query within [pg_background](https://github.com/vibhorkum/pg_background).
 - "What if the web page returns junk?" Your SQL call will have to test for junk before doing anything with the payload.
 - "What if the web page never returns?" Set a short timeout, or send a cancel to the request, or just wait forever.
 - "What if a user queries a page they shouldn't?" Restrict function access, or just don't install a footgun like this extension where users can access it.

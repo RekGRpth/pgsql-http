@@ -28,7 +28,7 @@
  ***********************************************************************/
 
 /* Constants */
-#define HTTP_VERSION "1.3.1"
+#define HTTP_VERSION "1.4.0"
 #define HTTP_ENCODING "gzip"
 #define CURL_MIN_VERSION 0x071400 /* 7.20.0 */
 
@@ -129,6 +129,7 @@ static http_curlopt settable_curlopts[] = {
 	{ "CURLOPT_TIMEOUT", NULL, CURLOPT_TIMEOUT, CURLOPT_LONG, false },
 	{ "CURLOPT_TIMEOUT_MS", NULL, CURLOPT_TIMEOUT_MS, CURLOPT_LONG, false },
 	{ "CURLOPT_CONNECTTIMEOUT", NULL, CURLOPT_CONNECTTIMEOUT, CURLOPT_LONG, false },
+    { "CURLOPT_USERAGENT", NULL, CURLOPT_USERAGENT, CURLOPT_STRING, false },
 	{ "CURLOPT_IPRESOLVE", NULL, CURLOPT_IPRESOLVE, CURLOPT_LONG, false },
 #if LIBCURL_VERSION_NUM >= 0x070903 /* 7.9.3 */
 	{ "CURLOPT_SSLCERTTYPE", NULL, CURLOPT_SSLCERTTYPE, CURLOPT_STRING, false },
@@ -222,6 +223,7 @@ http_interrupt_handler(int sig)
 	/* Handle the signal here */
 	elog(DEBUG2, "http_interrupt_handler: sig=%d", sig);
 	http_interrupt_requested = sig;
+	pgsql_interrupt_handler(sig);
 	return;
 }
 #endif /* 7.39.0 */
@@ -765,6 +767,9 @@ http_get_handle()
 	curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 1);
 	curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, 5000);
 
+    /* Set the user agent. If not set, use PG_VERSION as default */
+    curl_easy_setopt(handle, CURLOPT_USERAGENT, PG_VERSION_STR);
+
 	if (!handle)
 		ereport(ERROR, (errmsg("Unable to initialize CURL")));
 
@@ -805,6 +810,61 @@ Datum http_reset_curlopt(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_BOOL(true);
+}
+
+Datum http_list_curlopt(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(http_list_curlopt);
+Datum http_list_curlopt(PG_FUNCTION_ARGS)
+{
+	struct list_state {
+	    size_t i; /* read position */
+	};
+
+	MemoryContext oldcontext, newcontext;
+	FuncCallContext *funcctx;
+	struct list_state *state;
+	Datum vals[2];
+	bool nulls[2];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+        funcctx = SRF_FIRSTCALL_INIT();
+		newcontext = funcctx->multi_call_memory_ctx;
+		oldcontext = MemoryContextSwitchTo(newcontext);
+		state = palloc0(sizeof(*state));
+		funcctx->user_fctx = state;
+		if(get_call_result_type(fcinfo, 0, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                errmsg("composite-returning function called in context that cannot accept a composite")));
+
+        BlessTupleDesc(funcctx->tuple_desc);
+        MemoryContextSwitchTo(oldcontext);
+    }
+
+    funcctx = SRF_PERCALL_SETUP();
+    state = funcctx->user_fctx;
+
+	while (1)
+	{
+	    Datum result;
+		HeapTuple tuple;
+		text *option, *value;
+		http_curlopt *opt = settable_curlopts + state->i++;
+		if (!opt->curlopt_str)
+			break;
+		if (!opt->curlopt_val)
+			continue;
+		option = cstring_to_text(opt->curlopt_str);
+		value = cstring_to_text(opt->curlopt_val);
+		vals[0] = PointerGetDatum(option);
+		vals[1] = PointerGetDatum(value);
+		nulls[0] = nulls[1] = 0;
+        tuple = heap_form_tuple(funcctx->tuple_desc, vals, nulls);
+        result = HeapTupleGetDatum(tuple);
+		SRF_RETURN_NEXT(funcctx, result);
+	}
+
+	SRF_RETURN_DONE(funcctx);
 }
 
 /**
@@ -956,9 +1016,6 @@ Datum http_request(PG_FUNCTION_ARGS)
 
 	/* Set the target URL */
 	CURL_SETOPT(g_http_handle, CURLOPT_URL, uri);
-
-	/* Set the user agent */
-	CURL_SETOPT(g_http_handle, CURLOPT_USERAGENT, PG_VERSION_STR);
 
 	/* Restrict to just http/https. Leaving unrestricted */
 	/* opens possibility of users requesting file:/// urls */
@@ -1259,14 +1316,15 @@ Datum http_request(PG_FUNCTION_ARGS)
 
 
 /* URL Encode Escape Chars */
-/* 48-57 (0-9) 65-90 (A-Z) 97-122 (a-z) 95 (_) 45 (-) */
+/* 45-46 (-.) 48-57 (0-9) 65-90 (A-Z) */
+/* 95 (_) 97-122 (a-z) 126 (~) */
 
 static int chars_to_not_encode[] = {
 	0,0,0,0,0,0,0,0,0,0,
 	0,0,0,0,0,0,0,0,0,0,
 	0,0,0,0,0,0,0,0,0,0,
 	0,0,0,0,0,0,0,0,0,0,
-	0,0,0,0,0,1,0,0,1,1,
+	0,0,0,0,0,1,1,0,1,1,
 	1,1,1,1,1,1,1,1,0,0,
 	0,0,0,0,0,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,
@@ -1274,7 +1332,7 @@ static int chars_to_not_encode[] = {
 	1,0,0,0,0,1,0,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,
 	1,1,1,1,1,1,1,1,1,1,
-	1,1,1,0,0,0,0,0
+	1,1,1,0,0,0,1,0
 };
 
 
