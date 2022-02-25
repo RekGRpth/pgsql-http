@@ -43,21 +43,25 @@
 #include <postgres.h>
 #include <fmgr.h>
 #include <funcapi.h>
+#include <access/genam.h>
 #include <access/htup.h>
+#include <access/table.h>
 #include <catalog/namespace.h>
 #include <catalog/pg_type.h>
+#include <catalog/pg_extension.h>
 #include <catalog/dependency.h>
 #include <commands/extension.h>
-
 #include <lib/stringinfo.h>
 #include <mb/pg_wchar.h>
 #include <nodes/pg_list.h>
 #include <utils/array.h>
 #include <utils/builtins.h>
 #include <utils/catcache.h>
+#include <utils/jsonb.h>
 #include <utils/lsyscache.h>
 #include <utils/syscache.h>
 #include <utils/typcache.h>
+#include <utils/fmgroids.h>
 #include <utils/guc.h>
 
 #if PG_VERSION_NUM >= 100000
@@ -354,7 +358,7 @@ http_readback(void *buffer, size_t size, size_t nitems, void *instream)
 	size_t reqsize = size * nitems;
 	StringInfo si = (StringInfo)instream;
 	size_t remaining = si->len - si->cursor;
-	size_t readsize = reqsize < remaining ? reqsize : remaining;
+	size_t readsize = Min(reqsize, remaining);
 	memcpy(buffer, si->data + si->cursor, readsize);
 	si->cursor += readsize;
 	return readsize;
@@ -575,6 +579,43 @@ header_array_to_slist(ArrayType *array, struct curl_slist *headers)
 }
 
 /**
+* Look up the namespace the extension is installed in
+*/
+static Oid
+get_extension_schema(Oid ext_oid)
+{
+	Oid			result;
+	Relation	rel;
+	SysScanDesc scandesc;
+	HeapTuple	tuple;
+	ScanKeyData entry[1];
+
+	rel = table_open(ExtensionRelationId, AccessShareLock);
+
+	ScanKeyInit(&entry[0],
+				Anum_pg_extension_oid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(ext_oid));
+
+	scandesc = systable_beginscan(rel, ExtensionOidIndexId, true,
+								  NULL, 1, entry);
+
+	tuple = systable_getnext(scandesc);
+
+	/* We assume that there can be at most one matching tuple */
+	if (HeapTupleIsValid(tuple))
+		result = ((Form_pg_extension) GETSTRUCT(tuple))->extnamespace;
+	else
+		result = InvalidOid;
+
+	systable_endscan(scandesc);
+
+	table_close(rel, AccessShareLock);
+
+	return result;
+}
+
+/**
 * Look up the tuple description for a extension-defined type,
 * avoiding the pitfalls of using relations that are not part
 * of the extension, but share the same name as the relation
@@ -584,33 +625,30 @@ static TupleDesc
 typname_get_tupledesc(const char *extname, const char *typname)
 {
 	Oid extoid = get_extension_oid(extname, true);
-	ListCell *l;
+	Oid extschemaoid;
 
 	if ( ! OidIsValid(extoid) )
 		elog(ERROR, "could not lookup '%s' extension oid", extname);
 
-	foreach(l, fetch_search_path(true))
-	{
-		Oid typnamespace = lfirst_oid(l);
+	extschemaoid = get_extension_schema(extoid);
 
 #if PG_VERSION_NUM >= 120000
-		Oid typoid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
-		                PointerGetDatum(typname),
-		                ObjectIdGetDatum(typnamespace));
+	Oid typoid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+	               PointerGetDatum(typname),
+	               ObjectIdGetDatum(extschemaoid));
 #else
-		Oid typoid = GetSysCacheOid2(TYPENAMENSP,
-		                PointerGetDatum(typname),
-		                ObjectIdGetDatum(typnamespace));
+	Oid typoid = GetSysCacheOid2(TYPENAMENSP,
+	               PointerGetDatum(typname),
+	               ObjectIdGetDatum(extschemaoid));
 #endif
 
-		if ( OidIsValid(typoid) )
+	if ( OidIsValid(typoid) )
+	{
+		// Oid typ_oid = get_typ_typrelid(rel_oid);
+		Oid relextoid = getExtensionOfObject(TypeRelationId, typoid);
+		if ( relextoid == extoid )
 		{
-			// Oid typ_oid = get_typ_typrelid(rel_oid);
-			Oid relextoid = getExtensionOfObject(TypeRelationId, typoid);
-			if ( relextoid == extoid )
-			{
-				return TypeGetTupleDesc(typoid, NIL);
-			}
+			return TypeGetTupleDesc(typoid, NIL);
 		}
 	}
 
@@ -671,9 +709,9 @@ header_string_to_array(StringInfo si)
 		int eo2 = pmatch[2].rm_eo;
 
 		/* Copy the matched portions out of the string */
-		memcpy(rv1, si->data+si->cursor+so1, eo1-so1 < RVSZ ? eo1-so1 : RVSZ);
+		memcpy(rv1, si->data+si->cursor+so1, Min(eo1-so1, RVSZ));
 		rv1[eo1-so1] = '\0';
-		memcpy(rv2, si->data+si->cursor+so2, eo2-so2 < RVSZ ? eo2-so2 : RVSZ);
+		memcpy(rv2, si->data+si->cursor+so2, Min(eo2-so2, RVSZ));
 		rv2[eo2-so2] = '\0';
 
 		/* Move forward for next match */
@@ -1104,7 +1142,7 @@ Datum http_request(PG_FUNCTION_ARGS)
 
 		/* Read the content */
 		content_text = DatumGetTextP(values[REQ_CONTENT]);
-		content_size = VARSIZE(content_text) - VARHDRSZ;
+		content_size = VARSIZE_ANY_EXHDR(content_text);
 
 		if ( method == HTTP_GET || method == HTTP_POST )
 		{
@@ -1206,7 +1244,11 @@ Datum http_request(PG_FUNCTION_ARGS)
 	}
 
 	/* Prepare our return object */
-	tup_desc = RelationNameGetTupleDesc("http_response");
+    if (get_call_result_type(fcinfo, 0, &tup_desc) != TYPEFUNC_COMPOSITE) {
+        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+            errmsg("%s called with incompatible return type", __func__)));
+    }
+
 	ncolumns = tup_desc->natts;
 	values = palloc0(sizeof(Datum)*ncolumns);
 	nulls = palloc0(sizeof(bool)*ncolumns);
@@ -1338,37 +1380,34 @@ static int chars_to_not_encode[] = {
 
 
 
-/**
-* Utility function for users building URL encoded requests, applies
-* standard URL encoding to an input string.
+/*
+* Take in a text pointer and output a cstring with
+* all encodable characters encoded.
 */
-Datum urlencode(PG_FUNCTION_ARGS);
-PG_FUNCTION_INFO_V1(urlencode);
-Datum urlencode(PG_FUNCTION_ARGS)
+static char*
+urlencode_cstr(const char* str_in, size_t str_in_len)
 {
-	text *txt = PG_GETARG_TEXT_P(0); /* Declare strict, so no test for NULL input */
-	size_t txt_size = VARSIZE(txt) - VARHDRSZ;
-	char *str_in, *str_out, *ptr;
+	char *str_out, *ptr;
 	size_t i;
 	int rv;
 
-	/* Point into the string */
-	str_in = VARDATA(txt);
+	if (!str_in_len) return pstrdup("");
 
-	/* Prepare the output string */
-	str_out = palloc0(txt_size * 4);
+	/* Prepare the output string, encoding can fluff the ouput */
+	/* considerably */
+	str_out = palloc0(str_in_len * 4);
 	ptr = str_out;
 
-	for ( i = 0; i < txt_size; i++ )
+	for (i = 0; i < str_in_len; i++)
 	{
 		unsigned char c = str_in[i];
 
 		/* Break on NULL */
-		if ( c == '\0' )
+		if (c == '\0')
 			break;
 
 		/* Replace ' ' with '+' */
-		if ( c  == ' ' )
+		if (c  == ' ')
 		{
 			*ptr = '+';
 			ptr++;
@@ -1376,7 +1415,7 @@ Datum urlencode(PG_FUNCTION_ARGS)
 		}
 
 		/* Pass basic characters through */
-		if ( (c < 127) && chars_to_not_encode[(int)(str_in[i])] )
+		if ((c < 127) && chars_to_not_encode[(int)(str_in[i])])
 		{
 			*ptr = str_in[i];
 			ptr++;
@@ -1386,14 +1425,119 @@ Datum urlencode(PG_FUNCTION_ARGS)
 		/* Encode the remaining chars */
 		rv = snprintf(ptr, 4, "%%%02X", c);
 		if ( rv < 0 )
-			PG_RETURN_NULL();
+			return NULL;
 
 		/* Move pointer forward */
 		ptr += 3;
 	}
 	*ptr = '\0';
 
-	PG_RETURN_TEXT_P(cstring_to_text(str_out));
+	return str_out;
+}
+
+/**
+* Utility function for users building URL encoded requests, applies
+* standard URL encoding to an input string.
+*/
+Datum urlencode(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(urlencode);
+Datum urlencode(PG_FUNCTION_ARGS)
+{
+	/* Declare SQL function strict, so no test for NULL input */
+	text *txt = PG_GETARG_TEXT_P(0);
+	char *encoded = urlencode_cstr(VARDATA(txt), VARSIZE_ANY_EXHDR(txt));
+	if (encoded)
+		PG_RETURN_TEXT_P(cstring_to_text(encoded));
+	else
+		PG_RETURN_NULL();
+}
+
+/**
+* Treat the top level jsonb map as a key/value set
+* to be fed into urlencode and return a correctly
+* encoded data string.
+*/
+Datum urlencode_jsonb(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(urlencode_jsonb);
+Datum urlencode_jsonb(PG_FUNCTION_ARGS)
+{
+	bool skipNested = false;
+	Jsonb* jb = PG_GETARG_JSONB_P(0);
+	JsonbIterator *it;
+	JsonbValue v;
+	JsonbIteratorToken r;
+	StringInfo si;
+	size_t count = 0;
+
+	if (!JB_ROOT_IS_OBJECT(jb))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("cannot call %s on a non-object", __func__)));
+	}
+
+	/* Buffer to write complete output into */
+	si = makeStringInfo();
+
+	it = JsonbIteratorInit(&jb->root);
+	while ((r = JsonbIteratorNext(&it, &v, skipNested)) != WJB_DONE)
+	{
+		skipNested = true;
+
+		if (r == WJB_KEY)
+		{
+			char *key, *key_enc, *value, *value_enc;
+
+			/* Skip zero-length key */
+			if(!v.val.string.len) continue;
+
+			/* Read and encode the key */
+			key = pnstrdup(v.val.string.val, v.val.string.len);
+			key_enc = urlencode_cstr(v.val.string.val, v.val.string.len);
+
+			/* Read and encode the value */
+			getKeyJsonValueFromContainer(&jb->root, key, strlen(key), &v);
+ 			switch(v.type)
+ 			{
+ 				case jbvString: {
+ 					value = pnstrdup(v.val.string.val, v.val.string.len);
+					break;
+ 				}
+ 				case jbvNumeric: {
+ 					value = numeric_normalize(v.val.numeric);
+					break;
+ 				}
+ 				case jbvBool: {
+					value = pstrdup(v.val.boolean ? "true" : "false");
+					break;
+ 				}
+ 				case jbvNull: {
+ 					value = pstrdup("");
+ 					break;
+ 				}
+ 				default: {
+					elog(DEBUG2, "skipping non-scalar value of '%s'", key);
+					continue;
+ 				}
+
+ 			}
+			/* Write the result */
+			value_enc = urlencode_cstr(value, strlen(value));
+			if (count++) appendStringInfo(si, "&");
+			appendStringInfo(si, "%s=%s", key_enc, value_enc);
+
+			/* Clean up temporary strings */
+			if (key) pfree(key);
+			if (value) pfree(value);
+			if (key_enc) pfree(key_enc);
+			if (value_enc) pfree(value_enc);
+		}
+	}
+
+	if (si->len)
+		PG_RETURN_TEXT_P(cstring_to_text_with_len(si->data, si->len));
+	else
+		PG_RETURN_NULL();
 }
 
 // Local Variables:
