@@ -80,7 +80,7 @@
 #  define table_close(rel, lock) heap_close((rel), (lock))
 #endif
 
-#ifndef PG_GETARG_JSONB_P
+#if PG_VERSION_NUM < 110000
 #define PG_GETARG_JSONB_P(x) DatumGetJsonb(PG_GETARG_DATUM(x))
 #endif
 
@@ -597,16 +597,15 @@ static Oid
 get_extension_schema(Oid ext_oid)
 {
 	Oid			result;
-	Relation	rel;
 	SysScanDesc scandesc;
 	HeapTuple	tuple;
 	ScanKeyData entry[1];
-	rel = table_open(ExtensionRelationId, AccessShareLock);
 #if PG_VERSION_NUM >= 120000
 	Oid pg_extension_oid = Anum_pg_extension_oid;
 #else
 	Oid pg_extension_oid = ObjectIdAttributeNumber;
 #endif
+	Relation rel = table_open(ExtensionRelationId, AccessShareLock);
 
 	ScanKeyInit(&entry[0],
 				pg_extension_oid,
@@ -642,6 +641,7 @@ typname_get_tupledesc(const char *extname, const char *typname)
 {
 	Oid extoid = get_extension_oid(extname, true);
 	Oid extschemaoid;
+	Oid typoid;
 
 	if ( ! OidIsValid(extoid) )
 		elog(ERROR, "could not lookup '%s' extension oid", extname);
@@ -649,11 +649,11 @@ typname_get_tupledesc(const char *extname, const char *typname)
 	extschemaoid = get_extension_schema(extoid);
 
 #if PG_VERSION_NUM >= 120000
-	Oid typoid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+	typoid = GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
 	               PointerGetDatum(typname),
 	               ObjectIdGetDatum(extschemaoid));
 #else
-	Oid typoid = GetSysCacheOid2(TYPENAMENSP,
+	typoid = GetSysCacheOid2(TYPENAMENSP,
 	               PointerGetDatum(typname),
 	               ObjectIdGetDatum(extschemaoid));
 #endif
@@ -1482,7 +1482,7 @@ Datum urlencode_jsonb(PG_FUNCTION_ARGS)
 	JsonbIterator *it;
 	JsonbValue v;
 	JsonbIteratorToken r;
-	StringInfo si;
+	StringInfoData si;
 	size_t count = 0;
 
 	if (!JB_ROOT_IS_OBJECT(jb))
@@ -1493,7 +1493,7 @@ Datum urlencode_jsonb(PG_FUNCTION_ARGS)
 	}
 
 	/* Buffer to write complete output into */
-	si = makeStringInfo();
+	initStringInfo(&si);
 
 	it = JsonbIteratorInit(&jb->root);
 	while ((r = JsonbIteratorNext(&it, &v, skipNested)) != WJB_DONE)
@@ -1550,8 +1550,8 @@ Datum urlencode_jsonb(PG_FUNCTION_ARGS)
  			}
 			/* Write the result */
 			value_enc = urlencode_cstr(value, strlen(value));
-			if (count++) appendStringInfo(si, "&");
-			appendStringInfo(si, "%s=%s", key_enc, value_enc);
+			if (count++) appendStringInfo(&si, "&");
+			appendStringInfo(&si, "%s=%s", key_enc, value_enc);
 
 			/* Clean up temporary strings */
 			if (key) pfree(key);
@@ -1561,8 +1561,8 @@ Datum urlencode_jsonb(PG_FUNCTION_ARGS)
 		}
 	}
 
-	if (si->len)
-		PG_RETURN_TEXT_P(cstring_to_text_with_len(si->data, si->len));
+	if (si.len)
+		PG_RETURN_TEXT_P(cstring_to_text_with_len(si.data, si.len));
 	else
 		PG_RETURN_NULL();
 }
