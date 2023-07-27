@@ -780,7 +780,7 @@ static bool
 set_curlopt(CURL* handle, const http_curlopt *opt)
 {
 	CURLcode err = CURLE_OK;
-	char http_error_buffer[CURL_ERROR_SIZE];
+	char http_error_buffer[CURL_ERROR_SIZE] = "\0";
 
 	memset(http_error_buffer, 0, sizeof(http_error_buffer));
 
@@ -1009,7 +1009,7 @@ Datum http_request(PG_FUNCTION_ARGS)
 
 	/* Processing */
 	CURLcode err;
-	char http_error_buffer[CURL_ERROR_SIZE];
+	char http_error_buffer[CURL_ERROR_SIZE] = "\0";
 
 	struct curl_slist *headers = NULL;
 	StringInfoData si_data;
@@ -1590,6 +1590,27 @@ Datum urlencode_jsonb(PG_FUNCTION_ARGS)
 	else
 		PG_RETURN_NULL();
 }
+
+Datum bytea_to_text(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(bytea_to_text);
+Datum bytea_to_text(PG_FUNCTION_ARGS)
+{
+	bytea *b = PG_GETARG_BYTEA_P(0);
+	text *t = palloc(VARSIZE_ANY(b));
+	memcpy(t, b, VARSIZE(b));
+	PG_RETURN_TEXT_P(t);
+}
+
+Datum text_to_bytea(PG_FUNCTION_ARGS);
+PG_FUNCTION_INFO_V1(text_to_bytea);
+Datum text_to_bytea(PG_FUNCTION_ARGS)
+{
+	text *t = PG_GETARG_TEXT_P(0);
+	bytea *b = palloc(VARSIZE_ANY(t));
+	memcpy(b, t, VARSIZE(t));
+	PG_RETURN_TEXT_P(b);
+}
+
 
 // Local Variables:
 // mode: C++
