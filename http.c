@@ -97,7 +97,8 @@ typedef enum {
 	HTTP_DELETE,
 	HTTP_PUT,
 	HTTP_HEAD,
-	HTTP_PATCH
+	HTTP_PATCH,
+	HTTP_UNKNOWN
 } http_method;
 
 /* Components (and postitions) of the http_request tuple type */
@@ -424,7 +425,7 @@ request_type(const char *method)
 	else if ( strcasecmp(method, "PATCH") == 0 )
 		return HTTP_PATCH;
 	else
-		return HTTP_GET;
+		return HTTP_UNKNOWN;
 }
 
 /**
@@ -1078,8 +1079,7 @@ Datum http_request(PG_FUNCTION_ARGS)
 		elog(ERROR, "http_request.method is NULL");
 	method_str = TextDatumGetCString(values[REQ_METHOD]);
 	method = request_type(method_str);
-	elog(DEBUG2, "pgsql-http: method '%s'", method_str);
-	pfree(method_str);
+	elog(DEBUG2, "pgsql-http: method_str: '%s', method: %d", method_str, method);
 
 	/* Set up global HTTP handle */
 	g_http_handle = http_get_handle();
@@ -1156,23 +1156,23 @@ Datum http_request(PG_FUNCTION_ARGS)
 		headers = header_array_to_slist(array, headers);
 	}
 
-	/* If we have a payload we send it, assuming we're either POST, GET, PATCH, PUT or DELETE */
+	/* If we have a payload we send it, assuming we're either POST, GET, PATCH, PUT or DELETE or UNKNOWN */
 	if ( ! nulls[REQ_CONTENT] && values[REQ_CONTENT] )
 	{
 		text *content_text;
 		long content_size;
-		char *content_type;
+		char *cstr;
 		char buffer[1024];
 
 		/* Read the content type */
 		if ( nulls[REQ_CONTENT_TYPE] || ! values[REQ_CONTENT_TYPE] )
 			elog(ERROR, "http_request.content_type is NULL");
-		content_type = TextDatumGetCString(values[REQ_CONTENT_TYPE]);
+		cstr = TextDatumGetCString(values[REQ_CONTENT_TYPE]);
 
 		/* Add content type to the headers */
-		snprintf(buffer, sizeof(buffer), "Content-Type: %s", content_type);
+		snprintf(buffer, sizeof(buffer), "Content-Type: %s", cstr);
 		headers = curl_slist_append(headers, buffer);
-		pfree(content_type);
+		pfree(cstr);
 
 		/* Read the content */
 		content_text = DatumGetTextP(values[REQ_CONTENT]);
@@ -1195,10 +1195,15 @@ Datum http_request(PG_FUNCTION_ARGS)
 
 			CURL_SETOPT(g_http_handle, CURLOPT_POSTFIELDS, text_to_cstring(content_text));
 		}
-		else if ( method == HTTP_PUT || method == HTTP_PATCH )
+		else if ( method == HTTP_PUT || method == HTTP_PATCH || method == HTTP_UNKNOWN )
 		{
 			if ( method == HTTP_PATCH )
 				CURL_SETOPT(g_http_handle, CURLOPT_CUSTOMREQUEST, "PATCH");
+
+			/* Assume the user knows what they are doing and pass unchanged */
+			if ( method == HTTP_UNKNOWN )
+				CURL_SETOPT(g_http_handle, CURLOPT_CUSTOMREQUEST, method_str);
+
 			initStringInfo(&si_read);
 			appendBinaryStringInfo(&si_read, VARDATA(content_text), content_size);
 			CURL_SETOPT(g_http_handle, CURLOPT_UPLOAD, 1);
@@ -1225,7 +1230,12 @@ Datum http_request(PG_FUNCTION_ARGS)
 		/* If we had a content we do not reach that part */
 		elog(ERROR, "http_request.content is NULL");
 	}
+	else if ( method == HTTP_UNKNOWN ){
+		/* Assume the user knows what they are doing and pass unchanged */
+		CURL_SETOPT(g_http_handle, CURLOPT_CUSTOMREQUEST, method_str);
+	}
 
+	pfree(method_str);
 	/* Set the headers */
 	CURL_SETOPT(g_http_handle, CURLOPT_HTTPHEADER, headers);
 
