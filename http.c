@@ -89,7 +89,14 @@
 #include <curl/curl.h>
 
 /* Set up PgSQL */
+#ifdef PG_MODULE_MAGIC_EXT
+PG_MODULE_MAGIC_EXT(
+	.name = "http",
+	.version = HTTP_VERSION
+);
+#else
 PG_MODULE_MAGIC;
+#endif
 
 /* HTTP request methods we support */
 typedef enum {
