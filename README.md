@@ -345,7 +345,7 @@ SET http.curlopt_timeout_ms = 200;
 You can also change the timeout for the connection, to avoid waiting for too long when a service is unavailable:
 
 ```sql
-SET SET http.curlopt_connecttimeout_ms = 100;
+SET http.curlopt_connecttimeout_ms = 100;
 ```
 
 When a timeout occurs during a request, a SQL error will be raised:
