@@ -339,7 +339,19 @@ SET http.curlopt_tcp_keepalive = 1;
 By default a 5 second timeout is set for the completion of a request.  If a different timeout is desired the following GUC variable can be used to set it in milliseconds:
 
 ```sql
-SET http.curlopt_timeout_msec = 200;
+SET http.curlopt_timeout_ms = 200;
+```
+
+You can also change the timeout for the connection, to avoid waiting for too long when a service is unavailable:
+
+```sql
+SET SET http.curlopt_connecttimeout_ms = 100;
+```
+
+When a timeout occurs during a request, a SQL error will be raised:
+
+```sql
+ERROR:  Operation timed out after 200 milliseconds with 0 bytes received
 ```
 
 ## Installation
