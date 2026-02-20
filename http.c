@@ -251,6 +251,17 @@ http_progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl
 
 #endif /* 7.39.0 */
 
+/*
+* In theory bringing memory handling inside the PgSQL
+* memory manager makes sense, but in practice the lifecycle
+* PgSQL is using is out of sync with the one curl is
+* using, so PgSQL might free a block of memory out
+* from under curl. If connection persistence was
+* removed, it would be possible to do this where curl
+* was entirely setup/connect/disconnect/shutdown
+* within a single function call. As it currently
+* stands, enabling this just causes crashes.
+*/
 #undef HTTP_MEM_CALLBACKS
 #ifdef HTTP_MEM_CALLBACKS
 static void *
@@ -1689,7 +1700,7 @@ Datum urlencode_jsonb(PG_FUNCTION_ARGS)
 				k.type = jbvString;
 				k.val.string.val = key;
 				k.val.string.len = strlen(key);
-v = *findJsonbValueFromContainer(&jb->root, JB_FOBJECT, &k);
+				v = *findJsonbValueFromContainer(&jb->root, JB_FOBJECT, &k);
 			}
 #else
 			getKeyJsonValueFromContainer(&jb->root, key, strlen(key), &v);
