@@ -66,6 +66,10 @@
 #include <utils/fmgroids.h>
 #include <utils/guc.h>
 
+#if PG_VERSION_NUM >= 170000
+#include <utils/wait_event.h>
+#endif
+
 #if PG_VERSION_NUM >= 90300
 #  include <access/htup_details.h>
 #endif
@@ -217,6 +221,10 @@ static size_t http_readback(void *buffer, size_t size, size_t nitems, void *inst
 /* Global variables */
 static CURL * g_http_handle = NULL;
 
+#if PG_VERSION_NUM >= 170000
+static uint32 wait_event_transfer = 0;
+#endif
+
 /*
 * Interrupt support is dependent on CURLOPT_XFERINFOFUNCTION which
 * is only available from 7.39.0 and up
@@ -243,6 +251,17 @@ http_progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl
 
 #endif /* 7.39.0 */
 
+/*
+* In theory bringing memory handling inside the PgSQL
+* memory manager makes sense, but in practice the lifecycle
+* PgSQL is using is out of sync with the one curl is
+* using, so PgSQL might free a block of memory out
+* from under curl. If connection persistence was
+* removed, it would be possible to do this where curl
+* was entirely setup/connect/disconnect/shutdown
+* within a single function call. As it currently
+* stands, enabling this just causes crashes.
+*/
 #undef HTTP_MEM_CALLBACKS
 #ifdef HTTP_MEM_CALLBACKS
 static void *
@@ -420,6 +439,10 @@ void _PG_init(void)
 	 * to manipulate CURL options.
 	 */
 	http_guc_init();
+
+#if PG_VERSION_NUM >= 170000
+	wait_event_transfer = WaitEventExtensionNew("HttpTransfer");
+#endif
 
 #ifdef HTTP_MEM_CALLBACKS
 	/*
@@ -872,7 +895,7 @@ http_check_curl_version(const curl_version_info_data *version_info)
 
 	if ( version_info->version_num < CURL_MIN_VERSION )
 	{
-		elog(ERROR, "pgsql-http requires Curl version 0.7.20 or higher");
+		elog(ERROR, "pgsql-http requires Curl version 7.20.0 or higher");
 	}
 }
 
@@ -1363,10 +1386,20 @@ Datum http_request(PG_FUNCTION_ARGS)
 	/* Set the headers */
 	CURL_SETOPT(g_http_handle, CURLOPT_HTTPHEADER, headers);
 
+#if PG_VERSION_NUM >= 170000
+	/* Set up wait event tracking */
+	pgstat_report_wait_start(wait_event_transfer);
+#endif
+
 	/*************************************************************************
 	* PERFORM THE REQUEST!
 	**************************************************************************/
 	http_return = curl_easy_perform(g_http_handle);
+
+#if PG_VERSION_NUM >= 170000
+	pgstat_report_wait_end();
+#endif
+
 	elog(DEBUG2, "pgsql-http: queried '%s'", uri);
 	elog(DEBUG2, "pgsql-http: http_return '%d'", http_return);
 
@@ -1667,7 +1700,7 @@ Datum urlencode_jsonb(PG_FUNCTION_ARGS)
 				k.type = jbvString;
 				k.val.string.val = key;
 				k.val.string.len = strlen(key);
-v = *findJsonbValueFromContainer(&jb->root, JB_FOBJECT, &k);
+				v = *findJsonbValueFromContainer(&jb->root, JB_FOBJECT, &k);
 			}
 #else
 			getKeyJsonValueFromContainer(&jb->root, key, strlen(key), &v);
